@@ -32,9 +32,22 @@ const MUTATORS = [
   { id: 'tilt', name: 'TILT-A-WHIRL', tag: 'the arena is seasick', color: '#5dd9ff', dur: 9 },
   { id: 'rampage', name: 'RAMPAGE', tag: "can't shoot. can't die. RAM THEM", color: '#ff3b3b', dur: 6 },
   { id: 'dark', name: 'LIGHTS OUT', tag: 'who turned off the lights?', color: '#aab4d4', dur: 7 },
-  { id: 'bertha', name: 'BIG BERTHA', tag: 'she is here and she is angry', color: '#ff4d6d', dur: 3 },
+  { id: 'bertha', name: 'BIG BERTHA', tag: 'she is here and she is angry', color: '#ff4d6d', dur: 3, instant: true },
+  { id: 'laser', name: 'DEATH RAY', tag: 'dash through the beam. or else', color: '#ff2e63', dur: 9 },
+  { id: 'mega', name: 'MEGA CANNON', tag: 'huge shots that punch through everything', color: '#ffb703', dur: 9 },
+  { id: 'homing', name: 'HEAT SEEKERS', tag: 'your bullets have opinions', color: '#80ffdb', dur: 10 },
+  { id: 'hydra', name: 'HYDRA', tag: 'kill one, two more pop out', color: '#52b788', dur: 8 },
+  { id: 'swarm', name: "SWARM O'CLOCK", tag: 'triple the enemies, extra loot', color: '#f72585', dur: 8 },
+  { id: 'warp', name: 'TELEPORT ROULETTE', tag: 'you will not stay where you are', color: '#c77dff', dur: 8 },
+  { id: 'mirror', name: 'MIRROR WORLD', tag: 'left is right is left', color: '#48cae4', dur: 7 },
+  { id: 'wrap', name: 'NO WALLS', tag: 'leave one side, arrive on the other', color: '#b5e48c', dur: 10 },
+  { id: 'emoji', name: 'CLOWN INVASION', tag: 'this is fine', color: '#ffc8dd', dur: 10 },
+  { id: 'jackpot', name: 'TRIPLE JACKPOT', tag: 'three rules at once. good luck', color: '#ffd700', dur: 2, instant: true },
 ];
-const FRIENDLY_FIRST = ['storm', 'bouncy', 'clones', 'disco', 'loot'];
+// Pairs that would hide a lethal hazard or cancel each other out.
+const CLASH = { dark: ['laser', 'meteor'], laser: ['dark'], meteor: ['dark'], reverse: ['mirror'], mirror: ['reverse'] };
+const EMOJI = ['\u{1F921}', '\u{1F47B}', '\u{1F4A9}', '\u{1F47D}', '\u{1F916}', '\u{1F383}', '\u{1F479}', '\u{1F414}'];
+const FRIENDLY_FIRST = ['storm', 'bouncy', 'clones', 'disco', 'loot', 'mega', 'homing'];
 
 const TYPES = {
   grunt: { r: 14, hp: 2, spd: 72, color: '#ff5d73', score: 10 },
@@ -59,7 +72,10 @@ let p, enemies = [], bullets = [], orbs = [], particles = [], pickups = [], text
 let active = [], flags = {}, roll = null, banner = null, chaosT = 0, lastMutator = '';
 let spawnT = 0, hordeT = 0, meteorT = 0, hole = { x: 0, y: 0 };
 let shakeAmt = 0, hitStop = 0, flash = 0, hugeK = 1, stormAng = 0, shotSfxT = 0;
-const cam = { a: 0, z: 1, sx: 0, sy: 0 };
+const cam = { a: 0, z: 1, fx: 1, sx: 0, sy: 0 };
+let warpT = 0, warpTo = null, laserA = 0;
+const chaosGap = () => (time < 30 ? 6 : time < 80 ? 4.5 : time < 150 ? 3.5 : 2.8);
+const overdrive = () => active.filter((a) => !a.def.instant).length >= 4;
 
 const keys = {};
 const mouse = { x: 0, y: 0 };
@@ -83,7 +99,7 @@ function reset() {
   enemies = []; bullets = []; orbs = []; particles = []; pickups = []; texts = []; booms = []; hazards = [];
   active = []; flags = {}; roll = null; banner = null; lastMutator = '';
   time = 0; score = 0; kills = 0; combo = 0; comboT = 0; bestCombo = 0; mutatorsSeen = 0;
-  chaosT = 5; spawnT = 0.5; hordeT = 30; meteorT = 0;
+  chaosT = 3.5; spawnT = 0.5; hordeT = 30; meteorT = 0; warpTo = null;
   shakeAmt = 0; hitStop = 0; flash = 0; hugeK = 1;
 }
 
@@ -172,11 +188,31 @@ const mult = () => Math.min(10, 1 + ((combo / 8) | 0));
 
 // -------------------------------------------------------------- mutators
 
+function rollPool() {
+  return MUTATORS.filter((m) => !flags[m.id] && m.id !== lastMutator && !(CLASH[m.id] || []).some((id) => flags[id]));
+}
+
 function startRoll() {
-  let pool = MUTATORS.filter((m) => !flags[m.id] && m.id !== lastMutator);
+  let pool = rollPool();
   if (mutatorsSeen === 0) pool = pool.filter((m) => FRIENDLY_FIRST.includes(m.id));
   if (!pool.length) return;
-  roll = { def: pick(pool), t: 1 };
+  const defs = [pick(pool)];
+  // Later in a run the machine deals two rules at a time.
+  const doubleChance = time > 100 ? 0.5 : time > 40 ? 0.3 : 0;
+  const rest = pool.filter((m) => m !== defs[0] && !m.instant && !(CLASH[defs[0].id] || []).includes(m.id));
+  if (!defs[0].instant && rest.length && Math.random() < doubleChance) defs.push(pick(rest));
+  roll = { defs, t: 1 };
+}
+
+function safeSpot() {
+  let spot = null, spotD = -Infinity;
+  for (let i = 0; i < 14; i++) {
+    const x = rand(60, W - 60), y = rand(60, H - 60);
+    let d = flags.hole ? Math.hypot(x - hole.x, y - hole.y) : 1e9;
+    for (const e of enemies) d = Math.min(d, Math.hypot(x - e.x, y - e.y) - e.cr);
+    if (d > spotD) { spotD = d; spot = { x, y }; }
+  }
+  return spot;
 }
 
 function activate(def) {
@@ -194,6 +230,17 @@ function activate(def) {
     while (Math.hypot(hole.x - p.x, hole.y - p.y) < Math.min(W, H) * 0.28);
   }
   if (def.id === 'bertha') spawn('bertha');
+  if (def.id === 'warp') { warpT = 1.6; warpTo = null; }
+  if (def.id === 'laser') laserA = Math.atan2(p.y - H / 2, p.x - W / 2) + Math.PI / 2;
+  if (def.id === 'jackpot') {
+    for (let i = 0; i < 3; i++) {
+      const pool = rollPool().filter((m) => !m.instant);
+      if (!pool.length) break;
+      activate(pick(pool));
+    }
+    banner = { def, t: 2.6, dur: 2.6 };
+    flash = 0.4;
+  }
   if (def.id === 'meteor') meteorT = 0.6;
 }
 
@@ -202,7 +249,7 @@ function updateChaos(dt) {
   const ended = active.filter((a) => a.t <= 0);
   if (ended.length) {
     active = active.filter((a) => a.t > 0);
-    for (const a of ended) if (a.def.id !== 'bertha') floatText(p.x, p.y - 34, a.def.name + ' OVER', a.def.color, 13);
+    for (const a of ended) if (!a.def.instant) floatText(p.x, p.y - 34, a.def.name + ' OVER', a.def.color, 13);
   }
   flags = {};
   for (const a of active) flags[a.def.id] = a;
@@ -211,11 +258,16 @@ function updateChaos(dt) {
     const before = roll.t;
     roll.t -= dt;
     if (((before * 14) | 0) !== ((roll.t * 14) | 0)) sfx.roll();
-    if (roll.t <= 0) { const d = roll.def; roll = null; activate(d); flags[d.id] = active[active.length - 1]; }
+    if (roll.t <= 0) {
+      const defs = roll.defs;
+      roll = null;
+      for (const d of defs) activate(d);
+      if (defs.length > 1) banner = { def: { name: defs.map((d) => d.name).join(' + '), tag: 'double trouble', color: '#fff' }, t: 2.6, dur: 2.6 };
+    }
   } else {
     chaosT -= dt;
     if (chaosT <= 0) {
-      chaosT = time < 45 ? 9 : time < 100 ? 7 : time < 180 ? 5.5 : 4.5;
+      chaosT = chaosGap();
       startRoll();
     }
   }
@@ -251,12 +303,12 @@ function updateSpawns(dt) {
   spawnT -= dt;
   if (spawnT <= 0) {
     spawnT = Math.max(0.22, 0.85 - time * 0.009);
-    const n = time > 90 ? 2 : 1;
+    const n = (time > 90 ? 2 : 1) * (flags.swarm ? 3 : 1);
     for (let i = 0; i < n && enemies.length < 120; i++) spawn(pickType());
   }
   hordeT -= dt;
   if (hordeT <= 0) {
-    hordeT = 30;
+    hordeT = 22;
     const n = Math.min(26, 12 + ((time / 30) | 0) * 2), rad = Math.hypot(W, H) / 2 + 40;
     const type = Math.random() < 0.5 ? 'runner' : 'grunt';
     for (let i = 0; i < n; i++) spawn(type, W / 2 + Math.cos((i / n) * TAU) * rad, H / 2 + Math.sin((i / n) * TAU) * rad);
@@ -297,13 +349,16 @@ function kill(e) {
   if (state !== 'play') return;
   kills++; combo++; comboT = 2.5;
   bestCombo = Math.max(bestCombo, combo);
-  const pts = e.def.score * mult() * (flags.disco ? 2 : 1);
+  const pts = e.def.score * mult() * (flags.disco ? 2 : 1) * (overdrive() ? 2 : 1);
   score += pts;
   floatText(e.x, e.y - e.cr, '+' + pts, flags.disco ? '#ff7bf5' : '#fff', 13 + Math.min(12, pts / 40));
   burst(e.x, e.y, e.def.color, 8 + e.r / 2);
   shake(Math.min(10, 2 + e.r / 6));
   sfx.kill();
   if (e.type === 'splitter') for (let i = 0; i < 3; i++) spawn('mini', e.x + rand(-12, 12), e.y + rand(-12, 12));
+  if (flags.hydra && e.type !== 'mini' && e.type !== 'bertha' && enemies.length < 150) {
+    for (let i = 0; i < 2; i++) spawn('mini', e.x + rand(-14, 14), e.y + rand(-14, 14));
+  }
   if (flags.chain) booms.push({ x: e.x, y: e.y, r: 78, delay: 0.09, dmg: 3, color: '#fff275' });
   if (e.type === 'bertha') {
     for (let i = 0; i < 16; i++) drop('gem', e.x, e.y);
@@ -312,10 +367,11 @@ function kill(e) {
     shake(20);
     return;
   }
-  const gems = flags.loot ? 3 : Math.random() < 0.35 ? 1 : 0;
+  const gems = (flags.loot ? 3 : Math.random() < 0.35 ? 1 : 0) + (flags.swarm ? 1 : 0);
   for (let i = 0; i < gems; i++) drop('gem', e.x, e.y);
   if (p.hp < p.maxHp && Math.random() < 0.04) drop('heart', e.x, e.y);
   else if (Math.random() < 0.012) drop('bomb', e.x, e.y);
+  else if (Math.random() < 0.02) drop('box', e.x, e.y);
 }
 
 function hurtPlayer() {
@@ -337,7 +393,7 @@ function hurtPlayer() {
 
 function shoot(x, y, a) {
   if (bullets.length > 600) return;
-  bullets.push({ x: x + Math.cos(a) * 14, y: y + Math.sin(a) * 14, vx: Math.cos(a) * 640, vy: Math.sin(a) * 640, life: flags.bouncy ? 2.2 : 1.1, bounces: 3 });
+  bullets.push({ x: x + Math.cos(a) * 14, y: y + Math.sin(a) * 14, vx: Math.cos(a) * 640, vy: Math.sin(a) * 640, life: flags.bouncy ? 2.2 : 1.1, bounces: 3, mega: !!flags.mega, hits: flags.mega ? [] : null });
 }
 
 function cloneSpots() {
@@ -353,9 +409,9 @@ function cloneSpots() {
 // ----------------------------------------------------------------- update
 
 function toWorld(sx, sy) {
-  const dx = (sx - W / 2) / cam.z, dy = (sy - H / 2) / cam.z;
-  const c = Math.cos(-cam.a), s = Math.sin(-cam.a);
-  return { x: dx * c - dy * s + W / 2, y: dx * s + dy * c + H / 2 };
+  const dx = sx - W / 2, dy = sy - H / 2, c = Math.cos(-cam.a), s = Math.sin(-cam.a);
+  const fx = Math.abs(cam.fx) < 0.05 ? 0.05 : cam.fx;
+  return { x: (dx * c - dy * s) / (cam.z * fx) + W / 2, y: (dx * s + dy * c) / cam.z + H / 2 };
 }
 
 function updatePlayer(dt) {
@@ -413,12 +469,25 @@ function updatePlayer(dt) {
       p.vx = (-dx / d) * 700; p.vy = (-dy / d) * 700; p.dashT = 0.2;
     }
   }
-  p.x = clamp(p.x + p.vx * pdt, p.r, W - p.r);
-  p.y = clamp(p.y + p.vy * pdt, p.r, H - p.r);
+  p.x += p.vx * pdt; p.y += p.vy * pdt;
+  if (flags.wrap) { p.x = (p.x + W) % W; p.y = (p.y + H) % H; }
+  else { p.x = clamp(p.x, p.r, W - p.r); p.y = clamp(p.y, p.r, H - p.r); }
+
+  if (flags.warp) {
+    warpT -= dt;
+    if (!warpTo && warpT <= 0.7) warpTo = safeSpot();
+    if (warpT <= 0 && warpTo) {
+      burst(p.x, p.y, '#c77dff', 14);
+      p.x = warpTo.x; p.y = warpTo.y; p.vx = p.vy = 0;
+      p.inv = Math.max(p.inv, 0.6);
+      booms.push({ x: p.x, y: p.y, r: 110, delay: 0, dmg: 5, big: true, color: '#c77dff' });
+      warpTo = null; warpT = 1.8;
+    }
+  } else warpTo = null;
 
   p.fireCd -= pdt;
   if (p.fireCd <= 0 && canFire && !flags.rampage) {
-    p.fireCd = flags.storm ? 0.2 : 0.14;
+    p.fireCd = (flags.storm ? 0.2 : 0.14) * (flags.mega ? 1.8 : 1);
     for (const o of [p, ...cloneSpots()]) {
       if (flags.storm) for (let i = 0; i < 8; i++) shoot(o.x, o.y, stormAng + (i * TAU) / 8);
       else shoot(o.x, o.y, p.aim + rand(-0.04, 0.04));
@@ -499,6 +568,18 @@ function updateEnemies(dt, playing) {
 function updateProjectiles(dt, playing) {
   for (const b of bullets) {
     b.life -= dt;
+    if (flags.homing) {
+      let t = null, bd = 240 * 240;
+      for (const e of enemies) {
+        const d = (e.x - b.x) ** 2 + (e.y - b.y) ** 2;
+        if (d < bd && !e.dead) { bd = d; t = e; }
+      }
+      if (t) {
+        const sp = Math.hypot(b.vx, b.vy), want = Math.atan2(t.y - b.y, t.x - b.x), cur = Math.atan2(b.vy, b.vx);
+        const a = cur + clamp(Math.atan2(Math.sin(want - cur), Math.cos(want - cur)), -7 * dt, 7 * dt);
+        b.vx = Math.cos(a) * sp; b.vy = Math.sin(a) * sp;
+      }
+    }
     if (flags.hole) {
       const dx = hole.x - b.x, dy = hole.y - b.y, d = Math.hypot(dx, dy) || 1, g = 90000 / (d + 40);
       b.vx += (dx / d) * g * dt; b.vy += (dy / d) * g * dt;
@@ -506,7 +587,8 @@ function updateProjectiles(dt, playing) {
     }
     b.x += b.vx * dt; b.y += b.vy * dt;
     if (b.x < 0 || b.x > W || b.y < 0 || b.y > H) {
-      if (flags.bouncy && b.bounces-- > 0) {
+      if (flags.wrap && !flags.bouncy) { b.x = (b.x + W) % W; b.y = (b.y + H) % H; }
+      else if (flags.bouncy && b.bounces-- > 0) {
         if (b.x < 0 || b.x > W) { b.vx = -b.vx; b.x = clamp(b.x, 0, W); }
         if (b.y < 0 || b.y > H) { b.vy = -b.vy; b.y = clamp(b.y, 0, H); }
       } else if (b.x < -30 || b.x > W + 30 || b.y < -30 || b.y > H + 30) b.life = 0;
@@ -514,8 +596,15 @@ function updateProjectiles(dt, playing) {
     if (b.life <= 0) continue;
     for (const e of enemies) {
       if (e.dead) continue;
-      const dx = e.x - b.x, dy = e.y - b.y, r = e.cr + 4;
+      const dx = e.x - b.x, dy = e.y - b.y, r = e.cr + (b.mega ? 13 : 4);
       if (dx * dx + dy * dy < r * r) {
+        if (b.mega) {
+          if (b.hits.includes(e)) continue;
+          b.hits.push(e);
+          e.vx += b.vx * 0.15; e.vy += b.vy * 0.15;
+          damage(e, 4);
+          continue;
+        }
         b.life = 0;
         e.vx += b.vx * 0.05; e.vy += b.vy * 0.05;
         damage(e, 1);
@@ -539,6 +628,17 @@ function updateProjectiles(dt, playing) {
 }
 
 function updateWorldBits(dt, playing) {
+  if (flags.laser) {
+    laserA += dt * 0.8;
+    // The beam only bites after a 1.2s telegraph.
+    if (flags.laser.def.dur - flags.laser.t > 1.2) {
+      const c = Math.cos(laserA), s = Math.sin(laserA);
+      for (const e of enemies) {
+        if (!e.dead && Math.abs((e.x - W / 2) * s - (e.y - H / 2) * c) < e.cr + 10) damage(e, 25 * dt);
+      }
+      if (playing && Math.abs((p.x - W / 2) * s - (p.y - H / 2) * c) < p.r + 6) hurtPlayer();
+    }
+  }
   for (const h of hazards) {
     h.t -= dt;
     if (h.t <= 0) booms.push({ x: h.x, y: h.y, r: h.r, delay: 0, dmg: 6, hurts: true, color: '#ff6b35' });
@@ -570,6 +670,11 @@ function updateWorldBits(dt, playing) {
         g.t = 0;
         if (g.type === 'gem') { score += 5 * mult(); comboT = Math.max(comboT, 1.5); sfx.gem(); }
         else if (g.type === 'heart') { p.hp = Math.min(p.maxHp, p.hp + 1); floatText(p.x, p.y - 30, '+1 HP', '#ff5d8f', 20); sfx.heart(); }
+        else if (g.type === 'box') {
+          const pool = rollPool();
+          if (pool.length) activate(pick(pool));
+          floatText(p.x, p.y - 40, 'MYSTERY BOX!', '#c77dff', 24);
+        }
         else {
           booms.push({ x: p.x, y: p.y, r: Math.hypot(W, H), delay: 0, dmg: 8, big: true, color: '#fff' });
           flash = 0.5; shake(20);
@@ -612,6 +717,7 @@ function update(dt, raw) {
   const tilt = flags.tilt, env = tilt ? Math.min(1, (tilt.def.dur - tilt.t) / 0.7, tilt.t / 0.7) : 0;
   cam.a = Math.sin(gt * 1.4) * 0.3 * env;
   cam.z = 1 - 0.14 * env;
+  cam.fx += ((flags.mirror ? -1 : 1) - cam.fx) * Math.min(1, raw * 8);
   cam.sx = rand(-shakeAmt, shakeAmt); cam.sy = rand(-shakeAmt, shakeAmt);
   canvas.style.filter = flags.disco ? `hue-rotate(${((gt * 220) | 0) % 360}deg) saturate(1.5)` : '';
   music(raw);
@@ -644,6 +750,18 @@ function eyes(r, lookA, angry) {
 
 function drawEnemy(e) {
   const r = e.cr, sq = 1 + Math.sin(gt * 10 + e.seed) * 0.08;
+  if (flags.emoji) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(Math.sin(gt * 8 + e.seed) * 0.3);
+    ctx.font = Math.round(r * 2.3) + 'px serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.globalAlpha = e.hit > 0 ? 0.5 : 1;
+    ctx.fillStyle = '#fff';
+    ctx.fillText(EMOJI[(e.seed | 0) % EMOJI.length], 0, 0);
+    ctx.restore();
+    return;
+  }
   ctx.save();
   ctx.translate(e.x, e.y);
   ctx.scale(sq, 1 / sq);
@@ -768,6 +886,10 @@ function drawWorld() {
     } else if (g.type === 'heart') {
       ctx.fillStyle = '#ff5d8f'; heartPath(g.x, g.y + bob, 10); ctx.fill();
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+    } else if (g.type === 'box') {
+      ctx.fillStyle = '#c77dff'; ctx.fillRect(g.x - 11, g.y + bob - 11, 22, 22);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(g.x - 11, g.y + bob - 11, 22, 22);
+      label('?', g.x, g.y + bob + 6, 17, '#fff');
     } else {
       ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(g.x, g.y + bob, 11, 0, TAU); ctx.fill();
       ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 3; ctx.stroke();
@@ -776,6 +898,24 @@ function drawWorld() {
   }
 
   for (const e of enemies) drawEnemy(e);
+
+  if (flags.laser) {
+    const live = flags.laser.def.dur - flags.laser.t > 1.2, L = W + H;
+    const c = Math.cos(laserA) * L, s = Math.sin(laserA) * L;
+    ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.moveTo(W / 2 - c, H / 2 - s); ctx.lineTo(W / 2 + c, H / 2 + s);
+    if (live) {
+      ctx.strokeStyle = 'rgba(255,46,99,0.35)'; ctx.lineWidth = 30 + Math.sin(gt * 30) * 6; ctx.stroke();
+      ctx.strokeStyle = '#ff2e63'; ctx.lineWidth = 14; ctx.stroke();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 5; ctx.stroke();
+    } else {
+      ctx.strokeStyle = 'rgba(255,46,99,0.8)'; ctx.lineWidth = 2; ctx.setLineDash([12, 10]); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+  if (warpTo && flags.warp) {
+    ctx.strokeStyle = '#c77dff'; ctx.lineWidth = 3; ctx.setLineDash([6, 6]);
+    ctx.beginPath(); ctx.arc(warpTo.x, warpTo.y, 14 + Math.max(0, warpT) * 40, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  }
 
   ctx.fillStyle = '#ff9f1c';
   for (const o of orbs) {
@@ -788,6 +928,11 @@ function drawWorld() {
   ctx.beginPath();
   for (const b of bullets) { ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx * 0.022, b.y - b.vy * 0.022); }
   ctx.stroke();
+  for (const b of bullets) {
+    if (!b.mega) continue;
+    ctx.fillStyle = '#ffb703'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(b.x, b.y, 12, 0, TAU); ctx.fill(); ctx.stroke();
+  }
 
   if (state === 'play') {
     for (const c of cloneSpots()) drawBlob(c.x, c.y, 11, 0.6);
@@ -844,17 +989,18 @@ function drawHud() {
   }
 
   // active mutators
-  const pw = 170 * ui;
-  active.filter((a) => a.def.id !== 'bertha').forEach((a, i) => {
-    const y = pad + 16 * ui + i * 30 * ui;
-    label(a.def.name, W / 2, y, 15 * ui, a.def.color);
-    ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(W / 2 - pw / 2, y + 5, pw, 4);
-    ctx.fillStyle = a.def.color; ctx.fillRect(W / 2 - pw / 2, y + 5, pw * clamp(a.t / a.def.dur, 0, 1), 4);
+  const pw = 130 * ui;
+  active.filter((a) => !a.def.instant).forEach((a, i) => {
+    const y = pad + 96 * ui + i * 26 * ui;
+    label(a.def.name, pad, y, 13 * ui, a.def.color, 'left');
+    ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(pad, y + 4, pw, 3);
+    ctx.fillStyle = a.def.color; ctx.fillRect(pad, y + 4, pw * clamp(a.t / a.def.dur, 0, 1), 3);
   });
+  if (overdrive()) label('OVERDRIVE x2', W - pad, pad + 54 * ui, 19 * ui * (1 + Math.sin(gt * 12) * 0.08), '#ff2e63', 'right');
 
   if (roll) {
     const name = MUTATORS[((gt * 16) | 0) % MUTATORS.length].name;
-    label('THE MACHINE IS DECIDING...', W / 2, H * 0.24 - 40 * ui, 15 * ui, '#c9cdf0');
+    label(roll.defs.length > 1 ? 'DOUBLE TROUBLE INCOMING...' : 'THE MACHINE IS DECIDING...', W / 2, H * 0.24 - 40 * ui, 15 * ui, '#c9cdf0');
     label(name, W / 2 + rand(-3, 3), H * 0.24 + rand(-3, 3), 40 * ui, '#fff', 'center', 0.85);
   } else if (banner) {
     const k = banner.t / banner.dur, slam = 1 + Math.max(0, k - 0.88) * 9;
@@ -867,7 +1013,7 @@ function drawHud() {
     label('the rules are about to change', W / 2, H - 46 * ui, 15 * ui, '#c9cdf0', 'center', Math.min(1, 6 - time));
   }
   // countdown to the next roll
-  const cw = 160 * ui, total = time < 45 ? 9 : time < 100 ? 7 : time < 180 ? 5.5 : 4.5;
+  const cw = 160 * ui, total = chaosGap();
   ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(W / 2 - cw / 2, H - 22 * ui, cw, 5);
   ctx.fillStyle = '#ff5d8f'; ctx.fillRect(W / 2 - cw / 2, H - 22 * ui, cw * (roll ? 1 : clamp(1 - chaosT / total, 0, 1)), 5);
   label('NEXT CHAOS', W / 2, H - 28 * ui, 10 * ui, '#c9cdf0');
@@ -887,7 +1033,7 @@ function draw() {
   ctx.save();
   ctx.translate(W / 2 + cam.sx, H / 2 + cam.sy);
   ctx.rotate(cam.a);
-  ctx.scale(cam.z, cam.z);
+  ctx.scale(cam.z * cam.fx, cam.z);
   ctx.translate(-W / 2, -H / 2);
   drawWorld();
   ctx.restore();
@@ -941,7 +1087,7 @@ function togglePause() {
 
 function gameOver() {
   state = 'over';
-  const during = active.filter((a) => a.def.id !== 'bertha').map((a) => a.def.name).join(' + ');
+  const during = active.filter((a) => !a.def.instant).map((a) => a.def.name).join(' + ');
   const record = score > best;
   if (record) { best = score; try { localStorage.setItem('mayhem-best', String(best)); } catch (e) { /* storage unavailable */ } }
   active = []; flags = {}; roll = null; banner = null; bullets = []; orbs = []; hazards = [];
