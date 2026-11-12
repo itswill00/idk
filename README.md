@@ -1,13 +1,14 @@
 # Mayhem Machine
 
-A chaotic arena survival game for the browser. You are a small blob with a gun,
+A chaotic 3D arena survival game for the browser, rendered with Three.js. You are a small blob with a gun,
 the swarm never stops, and every few seconds the machine rolls a new rule:
 bullet storms, black holes, reversed controls, disco, meteors, lights out and more.
 Rules stack as the run goes on.
 
 ## Play
 
-No build step and no dependencies. Open `index.html`, or serve the folder:
+No build step. Three.js is vendored in `vendor/`, so there is nothing to install.
+The game loads as an ES module, so it has to be served over HTTP rather than opened from disk:
 
 ```sh
 npm run dev   # http://localhost:3000

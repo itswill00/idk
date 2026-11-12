@@ -12,7 +12,9 @@ html, body {
   touch-action: none;
 }
 
-#game {
+#hud { pointer-events: none; }
+
+#game, #hud {
   position: fixed;
   inset: 0;
   width: 100%;
